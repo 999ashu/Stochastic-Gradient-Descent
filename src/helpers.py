@@ -4,9 +4,13 @@ import numpy as np
 import pandas as pd
 import optuna
 import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow import keras
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 from src.data import load_california
+import time, psutil, numpy as np, matplotlib.pyplot as plt
+import torch, torch.nn as nn, torch.optim as optim, torch.nn.init as init
 
 
 class SGD:
@@ -298,4 +302,177 @@ def plot_performance_metrics(models, save_path=None):
     if save_path:
         plt.savefig(save_path, dpi=300)
 
+    plt.show()
+
+def init_torch_weights(m):
+    if isinstance(m, nn.Linear):
+        init.xavier_uniform_(m.weight)
+        init.zeros_(m.bias)
+
+def make_torch_optim(name, params, lr_dict):
+    lr = lr_dict[name]
+    if name.startswith("SGD"):
+        momentum = 0.9 if ("Momentum" in name or "Nesterov" in name) else 0.0
+        nesterov = "Nesterov" in name
+        return optim.SGD(params, lr=lr, momentum=momentum, nesterov=nesterov)
+    return {
+        "Adagrad": optim.Adagrad,
+        "RMSprop": optim.RMSprop,
+        "Adam":    optim.Adam,
+    }[name](params, lr=lr)
+
+class LinReg(nn.Module):
+    def __init__(self, d_in):
+        super().__init__()
+        self.lin = nn.Linear(d_in, 1)
+        self.apply(init_torch_weights)
+
+    def forward(self, x):
+        return self.lin(x)
+
+def train_torch(opt_name, Xtr_t, ytr_t, Xte_t, yte_t, epochs, batch, lr_dict):
+    model = LinReg(Xtr_t.shape[1])
+    loss_fn = nn.MSELoss()
+    opt = make_torch_optim(opt_name, model.parameters(), lr_dict)
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(Xtr_t, ytr_t),
+        batch_size=batch,
+        shuffle=True
+    )
+
+    baseline_mem = psutil.Process().memory_info().rss
+    peak_mem = baseline_mem
+    t0 = time.time()
+    train_losses, test_losses = [], []
+
+    for _ in range(epochs):
+        model.train()
+        for xb, yb in loader:
+            opt.zero_grad()
+            loss = loss_fn(model(xb), yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+        model.eval()
+        with torch.no_grad():
+            train_losses.append(loss_fn(model(Xtr_t), ytr_t).item())
+            test_losses.append(loss_fn(model(Xte_t), yte_t).item())
+        peak_mem = max(peak_mem, psutil.Process().memory_info().rss)
+
+    return {
+        "optimizer": opt_name,
+        "framework": "PyTorch",
+        "final_mse": test_losses[-1],
+        "train_losses": train_losses,
+        "test_losses": test_losses,
+        "training_time": time.time() - t0,
+        "memory_used": (peak_mem - baseline_mem) / 1024**2,
+    }
+
+def make_tf_optim(name, lr_dict):
+    lr = lr_dict[name]
+    if name.startswith("SGD"):
+        kwargs = {"nesterov": "Nesterov" in name}
+        if "Momentum" in name or "Nesterov" in name:
+            kwargs["momentum"] = 0.9
+        return keras.optimizers.SGD(learning_rate=lr, **kwargs)
+    return {
+        "Adagrad": keras.optimizers.Adagrad,
+        "RMSprop": keras.optimizers.RMSprop,
+        "Adam":    keras.optimizers.Adam,
+    }[name](learning_rate=lr)
+
+def create_tf_model(d_in):
+    return keras.Sequential([
+        keras.layers.Dense(
+            1,
+            input_shape=(d_in,),
+            kernel_initializer=keras.initializers.GlorotUniform(seed=42),
+            bias_initializer=keras.initializers.Zeros(),
+        )
+    ])
+
+def train_tf(opt_name, Xtr_tf, ytr_tf, Xte_tf, yte_tf, epochs, batch, lr_dict):
+    model = create_tf_model(Xtr_tf.shape[1])
+    opt = make_tf_optim(opt_name, lr_dict)
+    loss_fn = keras.losses.MeanSquaredError()
+
+    baseline_mem = psutil.Process().memory_info().rss
+    peak_mem = baseline_mem
+    t0 = time.time()
+
+    ds = tf.data.Dataset.from_tensor_slices((Xtr_tf, ytr_tf))
+    ds = ds.shuffle(len(Xtr_tf)).batch(batch)
+
+    train_losses, test_losses = [], []
+    for _ in range(epochs):
+        for xb, yb in ds:
+            with tf.GradientTape() as tape:
+                pred = model(xb, training=True)
+                loss = loss_fn(yb, pred)
+            grads = tape.gradient(loss, model.trainable_variables)
+            grads = [tf.clip_by_norm(g, 1.0) for g in grads]
+            opt.apply_gradients(zip(grads, model.trainable_variables))
+
+        tr_pred = model(Xtr_tf, training=False)
+        te_pred = model(Xte_tf, training=False)
+        train_losses.append(loss_fn(ytr_tf, tr_pred).numpy())
+        test_losses.append(loss_fn(yte_tf, te_pred).numpy())
+        peak_mem = max(peak_mem, psutil.Process().memory_info().rss)
+
+    return {
+        "optimizer": opt_name,
+        "framework": "TensorFlow",
+        "final_mse": test_losses[-1],
+        "train_losses": train_losses,
+        "test_losses": test_losses,
+        "training_time": time.time() - t0,
+        "memory_used": (peak_mem - baseline_mem) / 1024**2,
+    }
+
+def summarise(results):
+    print(f"{'Opt':<15}{'Framework':<12}{'MSE':<14}{'Time(s)':<9}{'Mem(MB)':<8}")
+    print("-" * 59)
+    for r in results:
+        print(
+            f"{r['optimizer']:<15}{r['framework']:<12}"
+            f"{r['final_mse']:<14.4e}"
+            f"{r['training_time']:<9.2f}"
+            f"{r['memory_used']:<8.2f}"
+        )
+
+def plot(results):
+    torch_r = [r for r in results if r["framework"] == "PyTorch"]
+    tf_r = [r for r in results if r["framework"] == "TensorFlow"]
+    names = [r["optimizer"] for r in torch_r]
+    x = np.arange(len(torch_r))
+    w = 0.35
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+
+    axs[0, 0].bar(x - w/2, [r["final_mse"] for r in torch_r], w, label="PyTorch")
+    axs[0, 0].bar(x + w/2, [r["final_mse"] for r in tf_r], w, label="TensorFlow")
+    axs[0, 0].set_yscale("log")
+    axs[0, 0].set_title("Final Test MSE (log)")
+    axs[0, 0].set_xticks(x, names, rotation=45)
+    axs[0, 0].legend(); axs[0, 0].grid(True, which="both")
+
+    axs[0, 1].bar(x - w/2, [r["training_time"] for r in torch_r], w)
+    axs[0, 1].bar(x + w/2, [r["training_time"] for r in tf_r], w)
+    axs[0, 1].set_title("Training Time (s)")
+    axs[0, 1].set_xticks(x, names, rotation=45); axs[0, 1].grid(True)
+
+    axs[1, 0].bar(x - w/2, [r["memory_used"] for r in torch_r], w)
+    axs[1, 0].bar(x + w/2, [r["memory_used"] for r in tf_r], w)
+    axs[1, 0].set_title("Extra Memory (MB)")
+    axs[1, 0].set_xticks(x, names, rotation=45); axs[1, 0].grid(True)
+
+    for r in torch_r:
+        axs[1, 1].plot(r["test_losses"], label=r["optimizer"])
+    axs[1, 1].set_title("PyTorch Convergence")
+    axs[1, 1].set_xlabel("Epoch"); axs[1, 1].set_ylabel("MSE")
+    axs[1, 1].legend(); axs[1, 1].grid(True)
+
+    plt.tight_layout()
     plt.show()
