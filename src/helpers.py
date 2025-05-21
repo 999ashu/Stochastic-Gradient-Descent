@@ -8,28 +8,23 @@ from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 from src.data import load_california
 
-class SGD:
-    """Стохастический градиентный спуск для задач регрессии."""
 
-    def __init__(self, learning_rate=0.01, epochs=100, batch_size=32,
-                 regularization=None, reg_param=0.01, lr_schedule=None,
-                 momentum=0.0, early_stopping=False, patience=10,
-                 verbose=False, random_state=None):
+class SGD:
+    def __init__(self, learning_rate=0.01, epochs=100, batch_size=32, regularization=None, reg_param=0.01,
+                 lr_schedule=None, random_state=None, early_stopping=False, patience=5):
         """
         Инициализация SGD с настройками
 
         Параметры:
-        learning_rate : начальная скорость обучения
-        epochs : количество эпох обучения
-        batch_size : размер мини-батча
-        regularization : тип регуляризации ('l1', 'l2', 'elasticnet')
-        reg_param : параметр регуляризации (lambda)
-        lr_schedule : график скорости обучения ('constant', 'time_decay', 'step_decay', 'exponential')
-        momentum : коэффициент импульса (0 - без импульса)
-        early_stopping : использовать раннюю остановку
-        patience : количество эпох без улучшения для ранней остановки
-        verbose : выводить информацию о процессе обучения
-        random_state : значение для воспроизводимости результатов
+        learning_rate : float - начальная скорость обучения
+        epochs : int - количество эпох обучения
+        batch_size : int - размер мини-батча
+        regularization : str или None - тип регуляризации ('l1', 'l2', 'elasticnet')
+        reg_param : float - параметр регуляризации (lambda)
+        lr_schedule : str или None - график скорости обучения ('constant', 'time_decay', 'step_decay', 'exponential')
+        random_state : int или None - инициализация генератора случайных чисел
+        early_stopping : bool - включение ранней остановки обучения
+        patience : int - количество эпох без улучшения для ранней остановки
         """
         self.learning_rate = learning_rate
         self.epochs = epochs
@@ -37,18 +32,13 @@ class SGD:
         self.regularization = regularization
         self.reg_param = reg_param
         self.lr_schedule = lr_schedule
-        self.momentum = momentum
         self.early_stopping = early_stopping
         self.patience = patience
-        self.verbose = verbose
 
-        self.random_state = random_state
         self.rng = np.random.RandomState(random_state)
 
         self.weights = None
         self.bias = None
-        self.velocity_w = None
-        self.velocity_b = None
 
         self.loss_history = []
         self.val_loss_history = []
@@ -57,134 +47,110 @@ class SGD:
         self.best_val_loss = float('inf')
         self.best_epoch = 0
 
+        self._lr_decay_rates = {
+            'time_decay': 0.01,
+            'exponential': 0.01
+        }
+        self._step_decay_params = {
+            'drop': 0.5,
+            'epochs_drop': 10
+        }
+
+        self._elasticnet_l1_ratio = 0.5
+
     def _initialize_parameters(self, n_features):
-        """Инициализация весов и смещения"""
-        # Инициализация Xavier для лучшей сходимости
         limit = np.sqrt(6 / (n_features + 1))
         self.weights = self.rng.uniform(-limit, limit, n_features)
         self.bias = 0.0
 
-        # Инициализация для импульса
-        self.velocity_w = np.zeros(n_features)
-        self.velocity_b = 0.0
-
-        # Для early stopping
         self.best_weights = self.weights.copy()
         self.best_bias = self.bias
 
     def _get_learning_rate(self, epoch):
-        """Расчет скорости обучения в зависимости от графика"""
         if self.lr_schedule is None or self.lr_schedule == 'constant':
             return self.learning_rate
 
-        if self.lr_schedule == 'time_decay':
-            decay_rate = 0.01
-            return self.learning_rate / (1 + decay_rate * epoch)
+        lr_schedulers = {
+            'time_decay': lambda e: self.learning_rate / (1 + self._lr_decay_rates['time_decay'] * e),
+            'step_decay': lambda e: self.learning_rate * np.power(
+                self._step_decay_params['drop'],
+                np.floor(e / self._step_decay_params['epochs_drop'])
+            ),
+            'exponential': lambda e: self.learning_rate * np.exp(-self._lr_decay_rates['exponential'] * e)
+        }
 
-        if self.lr_schedule == 'step_decay':
-            drop = 0.5
-            epochs_drop = 10
-            return self.learning_rate * np.power(drop, np.floor(epoch / epochs_drop))
-
-        if self.lr_schedule == 'exponential':
-            decay_rate = 0.01
-            return self.learning_rate * np.exp(-decay_rate * epoch)
-
-        return self.learning_rate
+        return lr_schedulers.get(self.lr_schedule, lambda e: self.learning_rate)(epoch)
 
     def _apply_regularization(self, weights, gradient):
-        """Применение регуляризации к градиенту"""
         if self.regularization is None:
             return gradient
 
-        if self.regularization == 'l2':
-            return gradient + self.reg_param * weights
+        regularizers = {
+            'l2': lambda w, g: g + self.reg_param * w,
+            'l1': lambda w, g: g + self.reg_param * np.sign(w),
+            'elasticnet': lambda w, g: g + self.reg_param * (
+                    self._elasticnet_l1_ratio * np.sign(w) +
+                    (1 - self._elasticnet_l1_ratio) * w
+            )
+        }
 
-        if self.regularization == 'l1':
-            return gradient + self.reg_param * np.sign(weights)
+        return regularizers.get(self.regularization, lambda w, g: g)(weights, gradient)
 
-        if self.regularization == 'elasticnet':
-            l1_ratio = 0.5
-            l1_contrib = self.reg_param * l1_ratio * np.sign(weights)
-            l2_contrib = self.reg_param * (1 - l1_ratio) * weights
-            return gradient + l1_contrib + l2_contrib
-
-        return gradient
-
-    def _compute_gradient(self, X_batch, y_batch):
-        """Вычисление градиента для мини-батча"""
-        m = X_batch.shape[0]
-        predictions = X_batch @ self.weights + self.bias  # оптимизировано
+    def _compute_gradient(self, x_batch, y_batch):
+        m = x_batch.shape[0]
+        predictions = x_batch @ self.weights + self.bias
         errors = predictions - y_batch
 
-        # Оптимизированное вычисление градиента
-        dw = (X_batch.T @ errors) / m
+        dw = (x_batch.T @ errors) / m
         db = np.mean(errors)
 
-        # Применение регуляризации только к весам
         dw = self._apply_regularization(self.weights, dw)
 
         return dw, db
 
-    def fit(self, X, y, X_val=None, y_val=None):
-        """
-        Обучение модели на данных
-        """
-        X = np.asarray(X)
+    def fit(self, x, y, x_val=None, y_val=None, verbose=0):
+        x = np.asarray(x)
         y = np.asarray(y)
 
-        if X_val is not None:
-            X_val = np.asarray(X_val)
+        use_validation = False
+        if x_val is not None and y_val is not None:
+            x_val = np.asarray(x_val)
             y_val = np.asarray(y_val)
             use_validation = True
-        else:
-            use_validation = False
 
-        n_samples, n_features = X.shape
+        n_samples, n_features = x.shape
         self._initialize_parameters(n_features)
 
         self.loss_history = []
         self.val_loss_history = []
-        no_improvement_count = 0
 
+        no_improvement_count = 0
         for epoch in range(self.epochs):
-            # Перемешиваем данные на каждой эпохе
             indices = self.rng.permutation(n_samples)
-            X_shuffled = X[indices]
+            x_shuffled = x[indices]
             y_shuffled = y[indices]
 
-            # Текущая скорость обучения
             current_lr = self._get_learning_rate(epoch)
 
-            # Мини-батч SGD
             for i in range(0, n_samples, self.batch_size):
                 end_idx = min(i + self.batch_size, n_samples)
-                X_batch = X_shuffled[i:end_idx]
+                x_batch = x_shuffled[i:end_idx]
                 y_batch = y_shuffled[i:end_idx]
 
-                # Вычисление градиентов
-                dw, db = self._compute_gradient(X_batch, y_batch)
+                dw, db = self._compute_gradient(x_batch, y_batch)
+                self.weights -= current_lr * dw
+                self.bias -= current_lr * db
 
-                # Обновление с использованием импульса
-                self.velocity_w = self.momentum * self.velocity_w - current_lr * dw
-                self.velocity_b = self.momentum * self.velocity_b - current_lr * db
-
-                # Обновление параметров
-                self.weights += self.velocity_w
-                self.bias += self.velocity_b
-
-            # Расчет ошибки на обучающей выборке
-            train_predictions = X @ self.weights + self.bias
+            train_predictions = x @ self.weights + self.bias
             train_loss = np.mean((train_predictions - y) ** 2)
             self.loss_history.append(train_loss)
 
-            # Расчет ошибки на валидационной выборке
+            val_loss = None
             if use_validation:
-                val_predictions = X_val @ self.weights + self.bias
+                val_predictions = x_val @ self.weights + self.bias
                 val_loss = np.mean((val_predictions - y_val) ** 2)
                 self.val_loss_history.append(val_loss)
 
-                # Сохраняем лучшие веса
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
                     self.best_weights = self.weights.copy()
@@ -194,39 +160,31 @@ class SGD:
                 else:
                     no_improvement_count += 1
 
-            # Вывод прогресса
-            if self.verbose and (epoch + 1) % 10 == 0:
-                status = f"Эпоха {epoch + 1}/{self.epochs}, loss: {train_loss:.6f}"
-                if use_validation:
-                    status += f", val_loss: {val_loss:.6f}"
-                print(status)
+            if verbose > 0 and epoch % verbose == 0:
+                val_str = f", val_loss: {val_loss:.6f}" if val_loss is not None else ""
+                print(f"Epoch {epoch}/{self.epochs} - loss: {train_loss:.6f}{val_str}")
 
-            # Ранняя остановка
             if self.early_stopping and use_validation and no_improvement_count >= self.patience:
-                if self.verbose:
-                    print(f"Ранняя остановка на эпохе {epoch + 1}")
-                # Восстанавливаем лучшие веса
-                self.weights = self.best_weights
-                self.bias = self.best_bias
+                if verbose > 0:
+                    print(f"Early stopping on epoch {epoch}")
                 break
 
-        # Восстанавливаем лучшие веса в конце обучения
         if use_validation:
             self.weights = self.best_weights
             self.bias = self.best_bias
+            if verbose > 0:
+                print(f"Best model on epoch {self.best_epoch} with val_loss: {self.best_val_loss:.6f}")
 
         return self
 
-    def predict(self, X):
-        """Выполнение прогноза"""
-        X = np.asarray(X)
-        return X @ self.weights + self.bias
+    def predict(self, x):
+        x = np.asarray(x)
+        return x @ self.weights + self.bias
 
 
 def model_objective(trial, model):
     x, y = load_california(scale=True)
-
-    X_train, X_test, y_train, y_test = train_test_split(
+    x_train, x_test, y_train, y_test = train_test_split(
         x, y, test_size=0.2, random_state=42
     )
 
@@ -234,66 +192,88 @@ def model_objective(trial, model):
 
     proc = psutil.Process()
     mem_before = proc.memory_info().rss
-
     t0 = time.perf_counter()
 
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
+    model.fit(x_train, y_train)
+    y_pred = model.predict(x_test)
 
     t1 = time.perf_counter()
-
     mem_after = proc.memory_info().rss
+    training_time = t1 - t0
+    memory_used = mem_after - mem_before
 
     mse = mean_squared_error(y_test, y_pred)
 
-    n_samples, n_features = X_train.shape
+    n_samples, n_features = x_train.shape
     n_batches_per_epoch = int(np.ceil(n_samples / batch_size))
 
-    forward_ops = n_features + (n_features-1)
-
+    forward_ops = n_features + (n_features - 1)
     gradient_ops = 2 * n_features
-
-    weight_update_ops = 2 * (n_features + 1)  # +1 for bias
+    weight_update_ops = 2 * (n_features + 1)
 
     ops_per_batch = batch_size * (forward_ops + gradient_ops) + weight_update_ops
-
     total_flops = ops_per_batch * n_batches_per_epoch * model.epochs
 
     trial.set_user_attr("batch_size", batch_size)
-    trial.set_user_attr("time_sec", t1 - t0)
-    trial.set_user_attr("mem_bytes", mem_after - mem_before)
+    trial.set_user_attr("time_sec", training_time)
+    trial.set_user_attr("mem_bytes", memory_used)
     trial.set_user_attr("flops", total_flops)
 
     return mse
 
 
-def test_model_performance(models):
-    study = optuna.create_study(direction="minimize")
+def test_model_performance(models, direction="minimize", n_jobs=-1, cache_results=False,
+                           cache_path="model_performance_results.csv"):
+    if models:
+        model = models[0]
+        study_name = f"SGD_reg-{model.regularization or 'none'}_lr-{model.learning_rate}"
+
+        if model.lr_schedule:
+            study_name += f"_schedule-{model.lr_schedule}"
+
+        if model.regularization:
+            study_name += f"_lambda-{model.reg_param}"
+
+        if model.early_stopping:
+            study_name += f"_early-stop-{model.patience}"
+    else:
+        study_name = "SGD_performance_study"
+
+    study = optuna.create_study(direction=direction, study_name=study_name)
 
     for _ in models:
         study.enqueue_trial({})
 
-    study.optimize(lambda trial: model_objective(trial, models[trial.number]),
-                   n_trials=len(models),
-                   show_progress_bar=True)
+    study.optimize(
+        lambda trial: model_objective(trial, models[trial.number]),
+        n_trials=len(models),
+        n_jobs=n_jobs,
+        show_progress_bar=True
+    )
 
     rows = []
-    for t in study.trials:
+    for i, t in enumerate(study.trials):
         rows.append({
+            "model_idx": i,
             "batch_size": t.user_attrs["batch_size"],
             "mse": t.value,
             "time_sec": t.user_attrs["time_sec"],
             "mem_bytes": t.user_attrs["mem_bytes"],
-            "flops": t.user_attrs["flops"]
+            "flops": t.user_attrs["flops"],
+            "time_per_epoch": t.user_attrs["time_sec"] / models[i].epochs if models[i].epochs > 0 else 0,
+            "study_name": study.study_name  # Сохраняем название исследования в результатах
         })
 
-    return pd.DataFrame(rows).sort_values("batch_size")
+    results = pd.DataFrame(rows).sort_values("batch_size")
+
+    if cache_results and cache_path:
+        results.to_csv(cache_path, index=False)
+
+    return results
 
 
-def plot_performance_metrics(models):
+def plot_performance_metrics(models, save_path=None):
     df = test_model_performance(models)
-
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     metrics = [("mse", "MSE"),
                ("time_sec", "Time (s)"),
@@ -301,12 +281,21 @@ def plot_performance_metrics(models):
                ("flops", "Estimated FLOPs")]
 
     for ax, (col, label) in zip(axes.flatten(), metrics):
-        ax.plot(df["batch_size"], df[col], "-o")
+        ax.scatter(df["batch_size"], df[col], s=60, alpha=0.7)
+        ax.plot(df["batch_size"], df[col], "-", alpha=0.7)
         ax.set_xscale("log", base=2)
+
+        if col in ["flops", "mem_bytes"]:
+            ax.set_yscale("log")
+
         ax.set_xlabel("batch_size")
         ax.set_ylabel(label)
         ax.set_title(f"{label} vs batch_size")
-        ax.grid(True)
+        ax.grid(True, linestyle='--', alpha=0.7)
 
     plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+
     plt.show()
