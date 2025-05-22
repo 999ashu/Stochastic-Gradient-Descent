@@ -4,14 +4,14 @@
 
 ## [Report](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/report.pdf)
 
-### [Task 1](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/SGD_LRS.ipynb)
+### [Task 1](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/src/SGD_LRS.ipynb)
 
-### [Task 2](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/SGD_LRS.ipynb)
+### [Task 2](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/src/SGD_LRS.ipynb)
 
-### [Task 3](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/SGD_LIB.ipynb)
+### [Task 3](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/src/SGD_LIB.ipynb)
 
-### [Additional Task 1](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/SGD_ISGD.ipynb)
+### [Additional Task 1](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/src/SGD_ISGD.ipynb)
 
-### [Additional Task 2](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/SVM_sklearn.ipynb) 
+### [Additional Task 2](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/src/SVM_sklearn.ipynb) 
 
 ### [SVM Report](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/report_opt2.pdf)
