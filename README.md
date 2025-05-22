@@ -14,4 +14,4 @@
 
 ### [Additional Task 2](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/SVM_sklearn.ipynb) 
 
-##  [*SVM Report](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/report_opt2.pdf)
+####  [SVM Report](https://github.com/999ashu/Stochastic-Gradient-Descent/blob/main/report_opt2.pdf)
